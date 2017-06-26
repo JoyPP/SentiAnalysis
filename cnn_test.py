@@ -1,5 +1,6 @@
 import cPickle as pickle
 import numpy as np
+import argparse
 
 from singa import layer
 from singa.layer import Layer
@@ -75,7 +76,7 @@ class Reshape(Layer):
 
 
 class CNNNet(object):
-    def __init__(self, embed_size=128, maxlen=53, max_features=33366, kernel_size=5, filters=64, pool_size=4, batch_size=32, use_cpu=True):
+    def __init__(self, embed_size=128, maxlen=53, max_features=33366, kernel_size=5, filters=64, pool_size=4, batch_size=32,  use_cpu=True):
         self.embed_size = embed_size  # word_embedding size
         self.maxlen = maxlen  # used to pad input tweet sequence
         self.vocab_size = max_features  # vocabulary size
@@ -95,7 +96,8 @@ class CNNNet(object):
         self.net = ffnet.FeedForwardNet(loss.SoftmaxCrossEntropy(), metric.Accuracy())
         self.net.add(Reshape('reshape1', (self.batch_size * self.maxlen, self.vocab_size), input_sample_shape=(self.batch_size, self.maxlen, self.vocab_size)))
         self.net.add(layer.Dense('embed', self.embed_size, input_sample_shape=(self.vocab_size,)))  # output: (embed_size, )
-        self.net.add(Reshape('reshape', (self.batch_size, 1, self.maxlen, self.embed_size)))
+        self.net.add(layer.Dropout('dropout'))
+        self.net.add(Reshape('reshape2', (self.batch_size, 1, self.maxlen, self.embed_size)))
         self.net.add(layer.Conv2D('conv', self.filters, (self.kernel_size, self.embed_size), border_mode='valid',
                                   input_sample_shape=( 1, self.maxlen, self.embed_size,)))  # output: (filter, embed_size)
         self.net.add(layer.Activation('activ'))  # output: (filter, embed_size)
@@ -160,7 +162,7 @@ class CNNNet(object):
                 loss += batch_loss
                 acc += batch_acc
 
-            print "training time = ", time() - start
+            print "\ntraining time = ", time() - start
             info = '\n training loss = %f, training accuracy = %f, lr = %f' \
                    % (loss / num_train_batch, acc / num_train_batch, get_lr(epoch))
             print info
@@ -169,8 +171,8 @@ class CNNNet(object):
             start = time()
             for b in range(num_test_batch):
                 batch_loss, batch_acc = 0.0, 0.0
-                x = test_x[idx[b * self.batch_size: (b + 1) * self.batch_size]]  # x.shape = (batch_size, maxlen)
-                y = test_y[idx[b * self.batch_size: (b + 1) * self.batch_size]]
+                x = test_x[b * self.batch_size: (b + 1) * self.batch_size]  # x.shape = (batch_size, maxlen)
+                y = test_y[b * self.batch_size: (b + 1) * self.batch_size]
                 sam_arrs = convert_samples(x, x.shape[1], self.vocab_size, dev)
                 tx = tensor.from_numpy(sam_arrs)
                 ty = tensor.from_numpy(y)
@@ -194,8 +196,25 @@ class CNNNet(object):
 
 
 if __name__ == '__main__':
-    train_dat, train_label, val_dat, val_label = load_sample()
+    parser = argparse.ArgumentParser(
+        description='Train multi-stack LSTM for '
+        'modeling  character sequence from plain text files')
+    parser.add_argument('-b', type=int, default=32, help='batch_size')
+    parser.add_argument('-l', type=int, default=53, help='sequence length')
+    parser.add_argument('-e', type=int, default=128, help='embed size')
+    parser.add_argument('-k', type=int, default=5, help='kernel size')
+    parser.add_argument('-f', type=int, default=64, help='num of filters')
+    parser.add_argument('-p', type=int, default=4, help='pooling size')
+    parser.add_argument('-m', type=int, default=10, help='max num of epoch')
+    parser.add_argument('-v', type=int, default=33366, help='vocabulary size')
+    parser.add_argument('-c', type=int, default=True, help='CPU flag')
+    args = parser.parse_args()
+
+    train_dat, train_label, val_dat, val_label = load_corpus('dataset.pkl')
+    print 'train_dat.shape = ', train_dat.shape ,'train_label.shape = ', train_label.shape
+    print 'val_dat.shape = ', val_dat.shape ,'val_label.shape = ', val_label.shape
     data = (train_dat, train_label, val_dat, val_label)
-    n = CNNNet()
+    n = CNNNet(args.e, args.l, args.v, args.k, args.f, args.p, args.b, args.c)
     n.build_net()
-    n.train(data, 5)
+    n.train(data, args.m)
+
