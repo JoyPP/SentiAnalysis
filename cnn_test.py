@@ -2,6 +2,7 @@ import cPickle as pickle
 import numpy as np
 
 from singa import layer
+from singa.layer import Layer
 from singa import loss
 from singa import device
 from singa import tensor
@@ -11,6 +12,7 @@ from singa.proto import model_pb2, core_pb2
 from singa import utils
 from singa import net as ffnet
 from singa import metric
+from time import time
 
 from data_loader import *
 
@@ -22,9 +24,54 @@ def convert_sample(data, seq_length, vocab_size, dev):
         x[t, data[t]] = 1
     return x
 
+def convert_samples(data, seq_length, vocab_size, dev):
+    x = []
+    for t in list(data):
+        x.append(convert_sample(t, seq_length, vocab_size, dev))
+    return np.array(x)
 
 def get_lr(epoch):
     return 0.01 / float(1 << (epoch / 50))
+
+class Reshape(Layer):
+    '''
+    Reshape the input tensor
+    '''
+    def __init__(self, name, output_shape, input_sample_shape=None):
+        '''
+        Args:
+            output_shape: a tuple of output shape
+            input_sample_shape: a tuple of input shape
+        '''
+        self.output_shape = output_shape
+        super(Reshape, self).__init__(name)
+        if input_sample_shape is not None:
+            self.setup(input_sample_shape)
+    def setup(self, in_shapes):
+        self.in_shape = in_shapes
+        self.has_setup=True
+    def get_output_sample_shape(self):
+        return self.output_shape
+    def forward(self, flag, input):
+        ''' Reshape the input tensor into output_shape
+
+        Args:
+             flag: not used
+             input: a single input tensor
+
+        Returns:
+            output tensor (reshaped input)
+        '''
+        assert isinstance(input, tensor.Tensor), 'The input must be Tensor'
+        outputs = tensor.from_numpy(np.reshape(tensor.to_numpy(input), self.output_shape))
+        return outputs
+    def backward(self, flag, dy):
+        ''' Return gradient, []'''
+        if len(self.in_shape) == 1:
+            dx = tensor.from_numpy(np.reshape(tensor.to_numpy(dy), (-1 , self.output_shape[-1])))
+        else:
+            dx = tensor.from_numpy(np.reshape(tensor.to_numpy(dy), self.in_shape))
+        return dx, []
 
 
 class CNNNet(object):
@@ -41,10 +88,11 @@ class CNNNet(object):
     def build_net(self):
         layer.engine = 'singacpp'
         self.net = ffnet.FeedForwardNet(loss.SoftmaxCrossEntropy(), metric.Accuracy())
-        self.net.add(
-            layer.Dense('embed', self.embed_size, input_sample_shape=(self.vocab_size,)))  # output: (embed_size, )
+        self.net.add(Reshape('reshape1', (self.batch_size * self.maxlen, self.vocab_size), input_sample_shape=(self.batch_size, self.maxlen, self.vocab_size)))
+        self.net.add(layer.Dense('embed', self.embed_size, input_sample_shape=(self.vocab_size,)))  # output: (embed_size, )
+        self.net.add(Reshape('reshape', (self.batch_size, 1, self.maxlen, self.embed_size)))
         self.net.add(layer.Conv2D('conv', self.filters, (self.kernel_size, self.embed_size), border_mode='valid',
-                                  input_sample_shape=(self.batch_size, 1, self.maxlen, self.embed_size,)))  # output: (filter, embed_size)
+                                  input_sample_shape=( 1, self.maxlen, self.embed_size,)))  # output: (filter, embed_size)
         self.net.add(layer.Activation('activ'))  # output: (filter, embed_size)
         self.net.add(layer.MaxPooling2D('max', self.kernel_size, self.pool_size))
         self.net.add(layer.Flatten('flatten'))
@@ -67,8 +115,8 @@ class CNNNet(object):
             else:
                 p.set_value(0)
 
-        tx = tensor.Tensor((self.maxlen, self.vocab_size), dev)
-        ty = tensor.Tensor((1,), dev, core_pb2.kInt)
+        tx = tensor.Tensor((self.batch_size, self.maxlen, self.vocab_size), dev)
+        ty = tensor.Tensor((self.batch_size,), dev, core_pb2.kInt)
         train_x, train_y, test_x, test_y = data
         num_train_batch = train_x.shape[0] / self.batch_size
         num_test_batch = test_x.shape[0] / self.batch_size
@@ -77,11 +125,18 @@ class CNNNet(object):
             np.random.shuffle(idx)
             loss, acc = 0.0, 0.0
             print 'Epoch %d' % epoch
+            start = time()
             for b in range(num_train_batch):
                 batch_loss, batch_acc = 0.0, 0.0
                 grads = []
                 x = train_x[idx[b * self.batch_size: (b + 1) * self.batch_size]]  # x.shape = (batch_size, maxlen)
                 y = train_y[idx[b * self.batch_size: (b + 1) * self.batch_size]]  # y.shape = (batch_size,)
+                # for input as (batch_size, max_len, vocab_size)
+                sam_arrs = convert_samples(x, x.shape[1], self.vocab_size, dev)
+                tx = tensor.from_numpy(sam_arrs)
+                ty = tensor.from_numpy(y)
+                grads, (batch_loss, batch_acc) = self.net.train(tx,ty)
+                '''
                 for idx_sam in range(len(x)):
                     sam_arr = x[idx_sam]  # one sequence (maxlen,)
                     sam_arr = convert_sample(sam_arr, sam_arr.shape[0], self.vocab_size, dev)
@@ -91,23 +146,31 @@ class CNNNet(object):
                     batch_loss += l
                     batch_acc += a
                     grads += grad
+                '''
                 for (s, p, g) in zip(self.net.param_names(), self.net.param_values(), grads):
                     opt.apply_with_lr(epoch, get_lr(epoch), g, p, str(s), b)
                 # update progress bar
                 utils.update_progress(b * 1.0 / num_train_batch,
-                                      'training loss = %f, accuracy = %f' % (batch_loss/num_train_batch, batch_acc/num_train_batch))
+                                      'training loss = %f, accuracy = %f' % (batch_loss, batch_acc))
                 loss += batch_loss
                 acc += batch_acc
 
+            print "training time = ", time() - start
             info = '\n training loss = %f, training accuracy = %f, lr = %f' \
-                   % (loss / num_train_batch, acc / num_train_batch)
+                   % (loss / num_train_batch, acc / num_train_batch, get_lr(epoch))
             print info
 
             loss, acc = 0.0, 0.0
+            start = time()
             for b in range(num_test_batch):
                 batch_loss, batch_acc = 0.0, 0.0
-                x = test_x[idx[b * batch_size: (b + 1) * batch_size]]  # x.shape = (batch_size, maxlen)
-                y = test_y[idx[b * batch_size: (b + 1) * batch_size]]
+                x = test_x[idx[b * self.batch_size: (b + 1) * self.batch_size]]  # x.shape = (batch_size, maxlen)
+                y = test_y[idx[b * self.batch_size: (b + 1) * self.batch_size]]
+                sam_arrs = convert_samples(x, x.shape[1], self.vocab_size, dev)
+                tx = tensor.from_numpy(sam_arrs)
+                ty = tensor.from_numpy(y)
+                grads, (batch_loss, batch_acc) = self.net.train(tx, ty)
+                '''
                 for idx_sam in range(len(x)):
                     sam_arr = x[idx_sam]
                     sam_arr = convert_sample(sam_arr, sam_arr.shape[0], self.vocab_size, dev)
@@ -116,11 +179,13 @@ class CNNNet(object):
                     grad, (l, a) = self.net.train(tx, ty)
                     batch_loss += l
                     batch_acc += a
+                '''
                 loss += batch_loss
                 acc += batch_acc
 
+            print "evaluation time = ", time() - start
             print 'test loss = %f, test accuracy = %f' \
-                  % (loss / num_train_batch, acc / num_train_batch)
+                  % (loss / num_test_batch, acc / num_test_batch)
 
 
 if __name__ == '__main__':
