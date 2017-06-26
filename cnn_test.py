@@ -75,7 +75,7 @@ class Reshape(Layer):
 
 
 class CNNNet(object):
-    def __init__(self, embed_size=128, maxlen=53, max_features=33366, kernel_size=5, filters=64, pool_size=4, batch_size=32):
+    def __init__(self, embed_size=128, maxlen=53, max_features=33366, kernel_size=5, filters=64, pool_size=4, batch_size=32, use_cpu=True):
         self.embed_size = embed_size  # word_embedding size
         self.maxlen = maxlen  # used to pad input tweet sequence
         self.vocab_size = max_features  # vocabulary size
@@ -85,8 +85,13 @@ class CNNNet(object):
         self.filters = filters
         self.pool_size = pool_size
 
+        self.use_cpu = use_cpu
+
     def build_net(self):
-        layer.engine = 'singacpp'
+        if self.use_cpu:
+            layer.engine = 'singacpp'
+        else:
+            layer.engine = 'cudnn'
         self.net = ffnet.FeedForwardNet(loss.SoftmaxCrossEntropy(), metric.Accuracy())
         self.net.add(Reshape('reshape1', (self.batch_size * self.maxlen, self.vocab_size), input_sample_shape=(self.batch_size, self.maxlen, self.vocab_size)))
         self.net.add(layer.Dense('embed', self.embed_size, input_sample_shape=(self.vocab_size,)))  # output: (embed_size, )
@@ -98,8 +103,8 @@ class CNNNet(object):
         self.net.add(layer.Flatten('flatten'))
         self.net.add(layer.Dense('dense', 2))
 
-    def train(self, data, max_epoch, use_cpu=True):
-        if use_cpu:
+    def train(self, data, max_epoch):
+        if self.use_cpu:
             print 'Using CPU'
             dev = device.get_default_device()
         else:
