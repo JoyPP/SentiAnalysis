@@ -104,11 +104,12 @@ class CNNNet(object):
             layer.engine = 'cudnn'
         self.net = ffnet.FeedForwardNet(loss.SoftmaxCrossEntropy(), metric.Accuracy())
         self.net.add(Reshape('reshape1', (self.vocab_size,), input_sample_shape=(self.maxlen, self.vocab_size)))
-        self.net.add(layer.Dense('embed', self.embed_size))#, input_sample_shape=(self.vocab_size,)))  # output: (embed_size, )
+        self.net.add(layer.Dense('embed', self.embed_size))  # output: (embed_size, )
         self.net.add(layer.Dropout('dropout'))
         self.net.add(Reshape('reshape2', (1, self.maxlen, self.embed_size)))
         self.net.add(layer.Conv2D('conv', self.filters, (self.kernel_size, self.embed_size), border_mode='valid'))  # output: (filter, embed_size)
-        self.net.add(layer.BatchNormalization('batchNorm'))
+        if self.use_cpu==False:
+            self.net.add(layer.BatchNormalization('batchNorm'))
         self.net.add(layer.Activation('activ'))  # output: (filter, embed_size)
         self.net.add(layer.MaxPooling2D('max', stride = self.pool_size))
         self.net.add(layer.Flatten('flatten'))
@@ -126,7 +127,6 @@ class CNNNet(object):
         opt = optimizer.SGD(momentum=0.9, weight_decay=1e-4)
         # opt = optimizer.RMSProp(constraint=optimizer.L2Constraint(5))
         for (p, n) in zip(self.net.param_values(), self.net.param_names()):
-            print n, p.shape
             if 'var' in n:
                 p.set_value(1.0)
             elif 'gamma' in n:
@@ -135,7 +135,7 @@ class CNNNet(object):
                 p.gaussian(0, 0.01)
             else:
                 p.set_value(0.0)
-            print p.l1()
+            print n, p.shape, p.l1()
 
         tx = tensor.Tensor((self.batch_size, self.maxlen, self.vocab_size), self.dev)
         ty = tensor.Tensor((self.batch_size,), self.dev, core_pb2.kInt)
@@ -146,10 +146,9 @@ class CNNNet(object):
         for epoch in range(max_epoch):
             np.random.shuffle(idx)
             loss, acc = 0.0, 0.0
-            print 'Epoch %d' % epoch
+            print '\nEpoch %d' % epoch
             start = time()
             for b in range(num_train_batch):
-                print '%d_th batch' % b
                 batch_loss, batch_acc = 0.0, 0.0
                 grads = []
                 x = train_x[idx[b * self.batch_size: (b + 1) * self.batch_size]]  # x.shape = (batch_size, maxlen)
@@ -158,7 +157,6 @@ class CNNNet(object):
                 sam_arrs = convert_samples(x, x.shape[1], self.vocab_size, self.dev)
                 tx.copy_from_numpy(sam_arrs)
                 ty.copy_from_numpy(np.array(y, dtype='int32'))
-                print tx.shape, ty.shape
                 grads, (batch_loss, batch_acc) = self.net.train(tx,ty)
                 for (s, p, g) in zip(self.net.param_names(), self.net.param_values(), grads):
                     opt.apply_with_lr(epoch, get_lr(epoch), g, p, str(s), b)
