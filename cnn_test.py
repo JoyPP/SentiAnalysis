@@ -64,14 +64,17 @@ class Reshape(Layer):
             output tensor (reshaped input)
         '''
         assert isinstance(input, tensor.Tensor), 'The input must be Tensor'
-        outputs = tensor.from_numpy(np.reshape(tensor.to_numpy(input), self.output_shape))
+        outputs = tensor.reshape(input, self.output_shape)
         return outputs
     def backward(self, flag, dy):
         ''' Return gradient, []'''
         if len(self.in_shape) == 1:
-            dx = tensor.from_numpy(np.reshape(tensor.to_numpy(dy), (-1 , self.output_shape[-1])))
+            row = 1
+            for i in range(len(dy.shape)-1):
+               row *= dy.shape[i]
+            dx = tensor.reshape(dy, (row , self.output_shape[-1]))
         else:
-            dx = tensor.from_numpy(np.reshape(tensor.to_numpy(dy), self.in_shape))
+            dx = tensor.reshape(dy, self.in_shape)
         return dx, []
 
 
@@ -105,25 +108,26 @@ class CNNNet(object):
         self.net.add(layer.Flatten('flatten'))
         self.net.add(layer.Dense('dense', 2))
 
-    def train(self, data, max_epoch):
+    def train(self, data, max_epoch, model_path = 'model'):
         if self.use_cpu:
             print 'Using CPU'
-            dev = device.get_default_device()
+            self.dev = device.get_default_device()
         else:
             print 'Using GPU'
-            dev = device.create_cuda_gpu()
+            self.dev = device.create_cuda_gpu()
 
-        self.net.to_device(dev)
+        self.net.to_device(self.dev)
         opt = optimizer.SGD(momentum=0.9, weight_decay=1e-4)
         # opt = optimizer.RMSProp(constraint=optimizer.L2Constraint(5))
         for (p, n) in zip(self.net.param_values(), self.net.param_names()):
+            print n, p.shape
             if 'weight' in n:
                 p.gaussian(0, 0.01)
             else:
                 p.set_value(0)
 
-        tx = tensor.Tensor((self.batch_size, self.maxlen, self.vocab_size), dev)
-        ty = tensor.Tensor((self.batch_size,), dev, core_pb2.kInt)
+        tx = tensor.Tensor((self.batch_size, self.maxlen, self.vocab_size), self.dev)
+        ty = tensor.Tensor((self.batch_size,), self.dev, core_pb2.kInt)
         train_x, train_y, test_x, test_y = data
         num_train_batch = train_x.shape[0] / self.batch_size
         num_test_batch = test_x.shape[0] / self.batch_size
@@ -139,21 +143,10 @@ class CNNNet(object):
                 x = train_x[idx[b * self.batch_size: (b + 1) * self.batch_size]]  # x.shape = (batch_size, maxlen)
                 y = train_y[idx[b * self.batch_size: (b + 1) * self.batch_size]]  # y.shape = (batch_size,)
                 # for input as (batch_size, max_len, vocab_size)
-                sam_arrs = convert_samples(x, x.shape[1], self.vocab_size, dev)
-                tx = tensor.from_numpy(sam_arrs)
-                ty = tensor.from_numpy(y)
+                sam_arrs = convert_samples(x, x.shape[1], self.vocab_size, self.dev)
+                tx.copy_from_numpy(sam_arrs)
+                ty.copy_from_numpy(np.array(y, dtype='int32'))
                 grads, (batch_loss, batch_acc) = self.net.train(tx,ty)
-                '''
-                for idx_sam in range(len(x)):
-                    sam_arr = x[idx_sam]  # one sequence (maxlen,)
-                    sam_arr = convert_sample(sam_arr, sam_arr.shape[0], self.vocab_size, dev)
-                    tx = tensor.from_numpy(sam_arr)
-                    ty = tensor.from_numpy(y[idx_sam:idx_sam+1])
-                    grad, (l, a) = self.net.train(tx, ty)
-                    batch_loss += l
-                    batch_acc += a
-                    grads += grad
-                '''
                 for (s, p, g) in zip(self.net.param_names(), self.net.param_values(), grads):
                     opt.apply_with_lr(epoch, get_lr(epoch), g, p, str(s), b)
                 # update progress bar
@@ -163,7 +156,7 @@ class CNNNet(object):
                 acc += batch_acc
 
             print "\ntraining time = ", time() - start
-            info = '\n training loss = %f, training accuracy = %f, lr = %f' \
+            info = '\ntraining loss = %f, training accuracy = %f, lr = %f' \
                    % (loss / num_train_batch, acc / num_train_batch, get_lr(epoch))
             print info
 
@@ -173,26 +166,37 @@ class CNNNet(object):
                 batch_loss, batch_acc = 0.0, 0.0
                 x = test_x[b * self.batch_size: (b + 1) * self.batch_size]  # x.shape = (batch_size, maxlen)
                 y = test_y[b * self.batch_size: (b + 1) * self.batch_size]
-                sam_arrs = convert_samples(x, x.shape[1], self.vocab_size, dev)
-                tx = tensor.from_numpy(sam_arrs)
-                ty = tensor.from_numpy(y)
+                sam_arrs = convert_samples(x, x.shape[1], self.vocab_size, self.dev)
+                tx.copy_from_numpy(sam_arrs)
+                ty.copy_from_numpy(np.array(y, dtype='int32'))
                 grads, (batch_loss, batch_acc) = self.net.train(tx, ty)
-                '''
-                for idx_sam in range(len(x)):
-                    sam_arr = x[idx_sam]
-                    sam_arr = convert_sample(sam_arr, sam_arr.shape[0], self.vocab_size, dev)
-                    tx.copy_from_numpy(sam_arr)
-                    ty.copy_from_numpy(y[idx_sam])
-                    grad, (l, a) = self.net.train(tx, ty)
-                    batch_loss += l
-                    batch_acc += a
-                '''
                 loss += batch_loss
                 acc += batch_acc
 
             print "evaluation time = ", time() - start
             print 'test loss = %f, test accuracy = %f' \
                   % (loss / num_test_batch, acc / num_test_batch)
+
+            if (epoch % 2) == 1 or epoch + 1 == max_epoch:
+                # checkpoint the file model
+                with open('%s_%d.bin' % (model_path, epoch), 'wb') as fd:
+                    print 'saving model to %s_%d.bin' % (model_path, epoch)
+                    d = {}
+                    for name, w in zip( self.net.param_names(), self.net.param_values()):
+                        w.to_host()
+                        d[name] = tensor.to_numpy(w)
+                        w.to_device(self.dev)
+                    pickle.dump(d, fd)
+
+    def load(self, model_path):
+        with open(model_path, 'rb') as fd:
+            params = pickle.load(fd)
+
+        if self.net:
+            for name, w in zip( self.net.param_names(), self.net.param_values() ):
+                w.copy_from_numpy(params[name])
+        else:
+            print 'please build net first.'
 
 
 if __name__ == '__main__':
@@ -209,12 +213,12 @@ if __name__ == '__main__':
     parser.add_argument('-v', type=int, default=33366, help='vocabulary size')
     parser.add_argument('-c', type=int, default=True, help='CPU flag')
     args = parser.parse_args()
-
+    #train_dat, train_label, val_dat, val_label = load_sample()
     train_dat, train_label, val_dat, val_label = load_corpus('dataset.pkl')
     print 'train_dat.shape = ', train_dat.shape ,'train_label.shape = ', train_label.shape
     print 'val_dat.shape = ', val_dat.shape ,'val_label.shape = ', val_label.shape
     data = (train_dat, train_label, val_dat, val_label)
-    n = CNNNet(args.e, args.l, args.v, args.k, args.f, args.p, args.b, args.c)
+    n = CNNNet(embed_size=args.e, maxlen=args.l, max_features=args.v, kernel_size=args.k, filters=args.f, pool_size=args.p, batch_size=args.b,  use_cpu=args.c)
     n.build_net()
     n.train(data, args.m)
 
