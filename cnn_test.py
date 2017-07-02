@@ -37,9 +37,9 @@ class CNNNet(object):
                        input_sample_shape=(1, cfg.seq_length, cfg.embed_size)))
         net.add(BatchNormalization('bn1'))
         net.add(Activation('activ1'))
-        #net.add(Conv2D('conv2', 32, (3, 1), pad=0))
-        #net.add(BatchNormalization('bn2'))
-        #net.add(Activation('activ2'))
+        net.add(Conv2D('conv2', 32, (3, 1), pad=0))
+        net.add(BatchNormalization('bn2'))
+        net.add(Activation('activ2'))
         net.add(MaxPooling2D('pool1', (3, 1), (2, 1), pad=0))
         net.add(Conv2D('conv3', 32, (3, 1), pad=0))
         net.add(BatchNormalization('bn3'))
@@ -91,6 +91,7 @@ class CNNNet(object):
                 meter['loss'] = update_perf(meter['loss'], loss.forward(True, logits, ty).l1())
                 meter['acc'] = update_perf(meter['acc'], acc.forward(logits, ty).l1())
                 grad = loss.backward()
+                grad /= cfg.batch_size
                 embed_grad=None
                 for (slist, plist, glist, ret) in self.net.backward(grad, output='conv1'):
                     for s, p, g in zip(slist, plist, glist):
